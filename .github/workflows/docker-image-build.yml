@@ -8,7 +8,7 @@ on:
     paths-ignore:
       - README.md
       - LICENSE
-    # Tag pushes skipped for now; main/dev already publish version + sha tags.
+  workflow_dispatch:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/transmission-base
@@ -18,18 +18,25 @@ env:
   UBUNTU_VERSION: "26.04"
 
 jobs:
+  # Each platform builds on a native runner. A QEMU arm64 compile of
+  # Transmission takes more than an hour and kills the hosted runner.
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -41,51 +48,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build a floating version tag plus an immutable per-build tag.
-      # Dev branch publishes a separate channel so unfinished work is not
-      # mistaken for a release.
-      - name: Compute image tags
-        id: tags
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SHORT_SHA="${GITHUB_SHA:0:7}"
-          BASE_TAG="${TRANSMISSION_VERSION}-ubuntu${UBUNTU_VERSION}"
-
-          TAGS=()
-
-          if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
-            # Dev channel: branch alias + versioned floating + immutable.
-            TAGS+=("${IMAGE_NAME}:dev")
-            TAGS+=("${IMAGE_NAME}:${BASE_TAG}-dev")
-            TAGS+=("${IMAGE_NAME}:${BASE_TAG}-dev-${SHORT_SHA}")
-          else
-            # main: floating + immutable.
-            TAGS+=("${IMAGE_NAME}:${BASE_TAG}")
-            TAGS+=("${IMAGE_NAME}:${BASE_TAG}-${SHORT_SHA}")
-          fi
-
-          # Join as a newline-separated list for docker/build-push-action.
-          {
-            echo "tags<<EOF"
-            printf "%s\n" "${TAGS[@]}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
-
-          echo "Floating / channel tags:"
-          printf "  - %s\n" "${TAGS[@]}"
-
-      - name: Build and push multi-arch image
+      - name: Build and push platform image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          provenance: false
+          tags: ${{ env.IMAGE_NAME }}:build-${{ github.sha }}-${{ matrix.arch }}
           build-args: |
             TRANSMISSION_VERSION=${{ env.TRANSMISSION_VERSION }}
             TRANSMISSION_SHA256=${{ env.TRANSMISSION_SHA256 }}
             UBUNTU_VERSION=${{ env.UBUNTU_VERSION }}
-          cache-from: type=gha,scope=${{ github.workflow }}
-          cache-to: type=gha,mode=max,scope=${{ github.workflow }}
+          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ github.workflow }}-${{ matrix.arch }}
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Floating version tag plus an immutable per-build tag. The dev branch
+      # publishes a separate channel.
+      - name: Create multi-arch tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          BASE_TAG="${TRANSMISSION_VERSION}-ubuntu${UBUNTU_VERSION}"
+          if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+            TAGS=("dev" "${BASE_TAG}-dev" "${BASE_TAG}-dev-${SHORT_SHA}")
+          else
+            TAGS=("${BASE_TAG}" "${BASE_TAG}-${SHORT_SHA}")
+          fi
+          ARGS=()
+          for t in "${TAGS[@]}"; do ARGS+=(-t "${IMAGE_NAME}:${t}"); done
+          docker buildx imagetools create "${ARGS[@]}" \
+            "${IMAGE_NAME}:build-${GITHUB_SHA}-amd64" \
+            "${IMAGE_NAME}:build-${GITHUB_SHA}-arm64"
+          docker buildx imagetools inspect "${IMAGE_NAME}:${TAGS[0]}"
