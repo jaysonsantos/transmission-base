@@ -8,14 +8,13 @@ on:
     paths-ignore:
       - README.md
       - LICENSE
+  pull_request:
   workflow_dispatch:
 
+# The versions live only in the Dockerfile ARG defaults. Renovate updates
+# them there (renovate.json), so the workflow passes no build arguments.
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/transmission-base
-  # Keep these in sync with the Dockerfile ARG defaults.
-  TRANSMISSION_VERSION: "4.1.4"
-  TRANSMISSION_SHA256: "86e7aa020cdf64826447034bc85f4d3b7c848d8c0891d9dc9b9fddfb2c805d22"
-  UBUNTU_VERSION: "26.04"
 
 jobs:
   # Each platform builds on a native runner. A QEMU arm64 compile of
@@ -53,23 +52,24 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          push: true
+          # A pull request only builds, so Renovate automerge waits for it.
+          push: ${{ github.event_name != 'pull_request' }}
           provenance: false
           tags: ${{ env.IMAGE_NAME }}:build-${{ github.sha }}-${{ matrix.arch }}
-          build-args: |
-            TRANSMISSION_VERSION=${{ env.TRANSMISSION_VERSION }}
-            TRANSMISSION_SHA256=${{ env.TRANSMISSION_SHA256 }}
-            UBUNTU_VERSION=${{ env.UBUNTU_VERSION }}
           cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ github.workflow }}-${{ matrix.arch }}
 
   merge:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -86,6 +86,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          arg() { sed -n "s/^ARG $1=//p" Dockerfile; }
+          TRANSMISSION_VERSION="$(arg TRANSMISSION_VERSION)"
+          UBUNTU_VERSION="$(arg UBUNTU_VERSION)"
           SHORT_SHA="${GITHUB_SHA:0:7}"
           BASE_TAG="${TRANSMISSION_VERSION}-ubuntu${UBUNTU_VERSION}"
           if [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then

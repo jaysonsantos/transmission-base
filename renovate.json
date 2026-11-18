@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "forkProcessing": "enabled",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Transmission release and the sha256 of its source tarball in the Dockerfile ARG defaults",
+      "managerFilePatterns": ["/^Dockerfile$/"],
+      "matchStrings": [
+        "ARG TRANSMISSION_VERSION=(?<currentValue>\\S+)\\n(?:#.*\\n)*ARG TRANSMISSION_SHA256=(?<currentDigest>[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "transmission/transmission",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Merge Transmission updates when the image build passes",
+      "matchPackageNames": ["transmission/transmission"],
+      "automerge": true
+    }
+  ]
+}
